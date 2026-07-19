@@ -56,6 +56,8 @@ slot->seq.store(pos + 1, release)        // publish
 
 Dequeue mirrors it: wait for `seq == pos + 1`, CAS `dequeue_pos`, read the data,
 then store `seq = pos + N` so the slot is free for the producer one lap later.
+The implementation in `mpmc_ring_buffer.hpp` is this pseudocode almost line for
+line, with the memory orders written out.
 
 The signed difference matters because the counters eventually wrap. A plain
 `seq < pos` breaks at the wrap point; the sign of the difference doesn't, as long
@@ -104,6 +106,11 @@ Intended orders — the full audit gets finished against the real code:
 | position CAS | relaxed | Positions only arbitrate who gets a slot; the seqs carry the data synchronisation |
 | position reloads on retry | relaxed | A stale value costs one extra retry, nothing worse |
 
+The claim CAS is `compare_exchange_weak`: it can fail spuriously, but it already
+sits in a retry loop, and weak avoids the extra inner loop that strong compiles
+to on LL/SC architectures like ARM. On failure the CAS also reloads the position
+for free.
+
 seq_cst everywhere would also be correct, just slower. I plan to add a toggle
 that forces seq_cst so the difference is a measurement rather than a guess.
 
@@ -117,8 +124,10 @@ shared cache line they'd ping-pong on every claim. Both get aligned to
 The fallback turned out to be the path that actually runs on my dev machine:
 AppleClang's libc++ doesn't ship the constant, and Apple Silicon cache lines are
 128 bytes (`sysctl hw.cachelinesize`), not 64 — the usual `alignas(64)` would put
-both counters inside one 128-byte boundary. Whether each *slot* also gets padded
-out is a density-vs-interference trade I'll decide from benchmarks.
+both counters inside one 128-byte boundary. Each *slot* is currently padded to
+its own line too — neighbouring slots get written by different threads, so I'm
+starting from the no-false-sharing layout and will measure what the padding
+costs in density once the benchmarks exist.
 
 ## 8. Batch operations
 
@@ -168,3 +177,25 @@ consumer can see the new head. Consumer's release store of `tail_` against the
 producer's acquire load: the slot is fully read before the producer can overwrite
 it. A thread's loads of its *own* index are relaxed — it's the only writer. The
 two-thread test runs under TSan to keep all of this honest.
+
+## 11. How correctness is tested
+
+The single-threaded suites pin down protocol behaviour first: full/empty edges,
+FIFO order, wraparound over many laps, and a white-box check that each slot's
+sequence number advances exactly one lap per reuse.
+
+The stress suite is where the guarantees get earned. Producers push tagged items
+(producer id and per-producer sequence number packed into 64 bits) while
+consumers drain. Afterwards, per producer, the popped count must equal what was
+pushed and the sequence numbers must sum to exactly M(M-1)/2 — count catches
+loss and duplication, the sum catches corrupted values. While popping, each
+consumer also asserts that any one producer's sequence numbers only ever
+increase as it sees them; that's the per-producer FIFO guarantee, and it catches
+reorderings the totals would miss. Configurations go up to 4 producers / 4
+consumers, plus a deliberately tiny N=4 buffer under 8 threads, where every
+operation lands on a full/empty boundary and claim races are constant.
+
+All of it runs under ThreadSanitizer and under AddressSanitizer+UBSan in CI
+(separate builds — TSan doesn't combine with ASan), with no suppressions. Races
+in this kind of code are scheduling-dependent, so locally the stress test gets
+run repeatedly under TSan rather than once.

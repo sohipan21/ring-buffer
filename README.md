@@ -7,9 +7,9 @@ atomic overhead across up to N elements per call. Lockless / non-blocking by des
 though not formally lock-free — that distinction, and every other design decision, is
 covered in [DESIGN.md](DESIGN.md).
 
-**Status:** early development. The SPSC baseline is implemented and tested
-(including under ThreadSanitizer); the MPMC protocol, stress-test suite, and
-benchmark harness are landing incrementally.
+**Status:** the MPMC core and SPSC baseline are implemented and stress-tested
+under ThreadSanitizer and ASan+UBSan in CI. Batch operations and the benchmark
+harness are next.
 
 ## Build & test
 

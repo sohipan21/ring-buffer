@@ -8,12 +8,16 @@ on:
 
 jobs:
   test:
-    name: ${{ matrix.compiler }}
+    name: ${{ matrix.compiler }} / sanitizer=${{ matrix.sanitizer }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         compiler: [g++, clang++]
+        sanitizer: [OFF, thread, address]
+    env:
+      # Sanitizer builds run the stress suite 5-20x slower; scale it down.
+      RINGBUFFER_STRESS_ITEMS: ${{ matrix.sanitizer == 'OFF' && '1000000' || '100000' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,6 +26,7 @@ jobs:
           cmake -B build
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+          -DRINGBUFFER_SANITIZER=${{ matrix.sanitizer }}
 
       - name: Build
         run: cmake --build build --parallel

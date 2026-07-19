@@ -1,7 +1,12 @@
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
+
+#include <ringbuffer/cache_line.hpp>
 
 namespace ringbuffer {
 
@@ -23,13 +28,70 @@ class MpmcRingBuffer {
                   "v1 supports trivially copyable element types only");
 
 public:
+    MpmcRingBuffer() {
+        // Slot i starts at seq == i: free for the producer at position i.
+        // No concurrent access yet, so relaxed stores are enough.
+        for (std::size_t i = 0; i < N; ++i) {
+            slots_[i].seq.store(i, std::memory_order_relaxed);
+        }
+    }
+
     /// Enqueues one element. Returns false if the buffer is full; nothing is
     /// claimed or written on failure.
-    [[nodiscard]] bool try_push(const T& item);
+    [[nodiscard]] bool try_push(const T& item) {
+        std::size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
+        Slot* slot;
+        for (;;) {
+            slot = &slots_[pos & kMask];
+            const std::size_t seq = slot->seq.load(std::memory_order_acquire);
+            const auto diff = static_cast<std::intptr_t>(seq) -
+                              static_cast<std::intptr_t>(pos);
+            if (diff == 0) {
+                // Free for this lap — claim it. Weak CAS: we're in a retry
+                // loop anyway, and failure reloads `pos` for us.
+                if (enqueue_pos_.compare_exchange_weak(
+                        pos, pos + 1, std::memory_order_relaxed)) {
+                    break;
+                }
+            } else if (diff < 0) {
+                return false;  // full — nothing claimed
+            } else {
+                // Another producer claimed this position; catch up.
+                pos = enqueue_pos_.load(std::memory_order_relaxed);
+            }
+        }
+        slot->data = item;
+        slot->seq.store(pos + 1, std::memory_order_release);  // publish
+        return true;
+    }
 
-    /// Dequeues one element into `out`. Returns false if the buffer is empty;
-    /// `out` is untouched on failure.
-    [[nodiscard]] bool try_pop(T& out);
+    /// Dequeues one element into `out`. Returns false if the buffer is
+    /// empty; `out` is untouched on failure.
+    [[nodiscard]] bool try_pop(T& out) {
+        std::size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
+        Slot* slot;
+        for (;;) {
+            slot = &slots_[pos & kMask];
+            const std::size_t seq = slot->seq.load(std::memory_order_acquire);
+            const auto diff = static_cast<std::intptr_t>(seq) -
+                              static_cast<std::intptr_t>(pos + 1);
+            if (diff == 0) {
+                // Published for this lap — claim it.
+                if (dequeue_pos_.compare_exchange_weak(
+                        pos, pos + 1, std::memory_order_relaxed)) {
+                    break;
+                }
+            } else if (diff < 0) {
+                return false;  // empty — nothing claimed
+            } else {
+                // Another consumer claimed this position; catch up.
+                pos = dequeue_pos_.load(std::memory_order_relaxed);
+            }
+        }
+        out = slot->data;
+        slot->seq.store(pos + N, std::memory_order_release);  // free for next lap
+        return true;
+    }
 
     /// Enqueues up to `count` elements from `items`. Returns the number
     /// actually enqueued — possibly fewer than `count`, possibly 0
@@ -42,25 +104,37 @@ public:
 
     /// Approximate element count. Inherently racy under concurrent use —
     /// intended for metrics and debugging, never for control flow.
-    [[nodiscard]] std::size_t size_approx() const;
+    [[nodiscard]] std::size_t size_approx() const {
+        return enqueue_pos_.load(std::memory_order_relaxed) -
+               dequeue_pos_.load(std::memory_order_relaxed);
+    }
 
     /// Compile-time capacity.
     static constexpr std::size_t capacity() { return N; }
+
+private:
+    friend struct MpmcWhiteBox;  // tests read slot seqs directly
+
+    // One slot per interference-size line for now: neighbouring slots get
+    // written by different threads, and the padding-vs-density trade hasn't
+    // been measured yet (DESIGN.md §7).
+    struct alignas(kCacheLineSize) Slot {
+        std::atomic<std::size_t> seq;
+        T data;
+    };
+
+    static constexpr std::size_t kMask = N - 1;
+
+    // The two claim counters are the hottest words in the structure; each
+    // gets its own line (DESIGN.md §7).
+    alignas(kCacheLineSize) std::atomic<std::size_t> enqueue_pos_{0};
+    alignas(kCacheLineSize) std::atomic<std::size_t> dequeue_pos_{0};
+    alignas(kCacheLineSize) std::array<Slot, N> slots_;
 };
 
 // ---------------------------------------------------------------------------
-// Stub bodies — the protocol from DESIGN.md §3 lands next.
+// Batch operations are not implemented yet (DESIGN.md §8 has the design).
 // ---------------------------------------------------------------------------
-
-template <typename T, std::size_t N>
-bool MpmcRingBuffer<T, N>::try_push(const T& /*item*/) {
-    return false;  // TODO: CAS claim loop
-}
-
-template <typename T, std::size_t N>
-bool MpmcRingBuffer<T, N>::try_pop(T& /*out*/) {
-    return false;  // TODO: CAS claim loop
-}
 
 template <typename T, std::size_t N>
 std::size_t MpmcRingBuffer<T, N>::try_push_batch(const T* /*items*/,
@@ -72,11 +146,6 @@ template <typename T, std::size_t N>
 std::size_t MpmcRingBuffer<T, N>::try_pop_batch(T* /*out*/,
                                                 std::size_t /*max_count*/) {
     return 0;  // TODO: single-CAS batch claim
-}
-
-template <typename T, std::size_t N>
-std::size_t MpmcRingBuffer<T, N>::size_approx() const {
-    return 0;  // TODO: enqueue/dequeue position difference
 }
 
 }  // namespace ringbuffer
