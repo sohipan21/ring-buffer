@@ -1,5 +1,7 @@
+find_package(Threads REQUIRED)
+
 add_executable(test_spsc test_spsc.cpp)
-target_link_libraries(test_spsc PRIVATE ringbuffer::ringbuffer)
+target_link_libraries(test_spsc PRIVATE ringbuffer::ringbuffer Threads::Threads)
 ringbuffer_configure_target(test_spsc)
 add_test(NAME spsc COMMAND test_spsc)
 

@@ -5,6 +5,8 @@
 #include <cassert>
 
 #include <cstddef>
+#include <cstdint>
+#include <thread>
 
 #include <ringbuffer/spsc_ring_buffer.hpp>
 
@@ -65,6 +67,44 @@ void test_wraparound_multiple_laps() {
     }
 }
 
+// One producer thread streams 1M sequential ints while one consumer drains.
+// The strict-sequence assert is the whole proof for SPSC: any lost, duplicated
+// or reordered item breaks it immediately. The checksum catches value
+// corruption independently of ordering.
+template <std::size_t N>
+void test_two_thread_transfer() {
+    constexpr int kItems = 1'000'000;
+    ringbuffer::SpscRingBuffer<int, N> buf;
+    std::uint64_t consumer_sum = 0;
+
+    std::thread producer([&buf] {
+        for (int i = 0; i < kItems; ++i) {
+            while (!buf.try_push(i)) {
+            }
+        }
+    });
+    std::thread consumer([&buf, &consumer_sum] {
+        int expected = 0;
+        std::uint64_t sum = 0;
+        while (expected < kItems) {
+            int out = -1;
+            if (buf.try_pop(out)) {
+                assert(out == expected);
+                ++expected;
+                sum += static_cast<std::uint64_t>(out);
+            }
+        }
+        consumer_sum = sum;
+    });
+    producer.join();
+    consumer.join();
+
+    constexpr auto kExpectedSum =
+        static_cast<std::uint64_t>(kItems) * (kItems - 1) / 2;
+    assert(consumer_sum == kExpectedSum);
+    assert(buf.size_approx() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -73,5 +113,8 @@ int main() {
     test_pop_on_empty_fails();
     test_fill_to_full_then_drain();
     test_wraparound_multiple_laps();
+
+    test_two_thread_transfer<1024>();
+    test_two_thread_transfer<4>();  // tiny buffer: constant boundary races
     return 0;
 }
