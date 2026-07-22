@@ -93,13 +93,15 @@ public:
         return true;
     }
 
-    /// Enqueues up to `count` elements from `items`. Returns the number
-    /// actually enqueued — possibly fewer than `count`, possibly 0
-    /// (partial-batch semantics, DESIGN.md §8).
+    /// Enqueues up to `count` elements from `items`. Probes the contiguous
+    /// run of free slots from the current position and claims it with a
+    /// single CAS; returns how many were enqueued — min(count, that run),
+    /// possibly 0 (partial-batch semantics, DESIGN.md §8).
     [[nodiscard]] std::size_t try_push_batch(const T* items, std::size_t count);
 
-    /// Dequeues up to `max_count` elements into `out`. Returns the number
-    /// actually dequeued — possibly 0.
+    /// Dequeues up to `max_count` elements into `out`. Probes the contiguous
+    /// run of ready slots and claims it with a single CAS; returns how many
+    /// were dequeued — min(max_count, that run), possibly 0.
     [[nodiscard]] std::size_t try_pop_batch(T* out, std::size_t max_count);
 
     /// Approximate element count. Inherently racy under concurrent use —
@@ -133,19 +135,92 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Batch operations are not implemented yet (DESIGN.md §8 has the design).
+// Batch operations. One CAS claims a contiguous run of k slots, amortising the
+// contended position-counter RMW across the whole batch. The run is found by a
+// forward scan, not a probe of the last slot: with several consumers (or
+// producers) completing out of order the free region can have holes, so
+// readiness is not contiguous and the last slot alone doesn't prove the rest
+// (DESIGN.md §8).
 // ---------------------------------------------------------------------------
 
 template <typename T, std::size_t N>
-std::size_t MpmcRingBuffer<T, N>::try_push_batch(const T* /*items*/,
-                                                 std::size_t /*count*/) {
-    return 0;  // TODO: single-CAS batch claim
+std::size_t MpmcRingBuffer<T, N>::try_push_batch(const T* items,
+                                                 std::size_t count) {
+    if (count == 0) {
+        return 0;
+    }
+    const std::size_t k0 = count < N ? count : N;  // can't claim past capacity
+    std::size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
+    std::size_t k;
+    for (;;) {
+        // Forward scan: longest contiguous run of slots free for this lap.
+        k = 0;
+        while (k < k0) {
+            const std::size_t seq =
+                slots_[(pos + k) & kMask].seq.load(std::memory_order_acquire);
+            const auto diff = static_cast<std::intptr_t>(seq) -
+                              static_cast<std::intptr_t>(pos + k);
+            if (diff != 0) {
+                break;  // not free (or claimed mid-scan) — run ends here
+            }
+            ++k;
+        }
+        if (k == 0) {
+            return 0;  // full at the front
+        }
+        // Claim all k at once. Success means enqueue_pos was still pos, so no
+        // other producer touched the scanned slots.
+        if (enqueue_pos_.compare_exchange_weak(pos, pos + k,
+                                               std::memory_order_relaxed)) {
+            break;
+        }
+        // CAS failed → pos reloaded; rescan from the new position.
+    }
+    for (std::size_t i = 0; i < k; ++i) {
+        Slot& slot = slots_[(pos + i) & kMask];
+        slot.data = items[i];
+        // Publish forward so consumers can start on early items while later
+        // ones are still being written.
+        slot.seq.store(pos + i + 1, std::memory_order_release);
+    }
+    return k;
 }
 
 template <typename T, std::size_t N>
-std::size_t MpmcRingBuffer<T, N>::try_pop_batch(T* /*out*/,
-                                                std::size_t /*max_count*/) {
-    return 0;  // TODO: single-CAS batch claim
+std::size_t MpmcRingBuffer<T, N>::try_pop_batch(T* out, std::size_t max_count) {
+    if (max_count == 0) {
+        return 0;
+    }
+    const std::size_t k0 = max_count < N ? max_count : N;
+    std::size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
+    std::size_t k;
+    for (;;) {
+        // Forward scan: longest contiguous run of slots published for this lap.
+        k = 0;
+        while (k < k0) {
+            const std::size_t seq =
+                slots_[(pos + k) & kMask].seq.load(std::memory_order_acquire);
+            const auto diff = static_cast<std::intptr_t>(seq) -
+                              static_cast<std::intptr_t>(pos + k + 1);
+            if (diff != 0) {
+                break;  // not ready — run ends here
+            }
+            ++k;
+        }
+        if (k == 0) {
+            return 0;  // empty at the front
+        }
+        if (dequeue_pos_.compare_exchange_weak(pos, pos + k,
+                                               std::memory_order_relaxed)) {
+            break;
+        }
+    }
+    for (std::size_t i = 0; i < k; ++i) {
+        Slot& slot = slots_[(pos + i) & kMask];
+        out[i] = slot.data;
+        slot.seq.store(pos + i + N, std::memory_order_release);  // free next lap
+    }
+    return k;
 }
 
 }  // namespace ringbuffer

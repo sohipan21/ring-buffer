@@ -132,13 +132,37 @@ costs in density once the benchmarks exist.
 ## 8. Batch operations
 
 `try_push_batch` / `try_pop_batch` move up to `count` elements for one CAS on the
-position — the most contended operation, amortised over the whole batch.
+position — the most contended operation, amortised over the whole batch. Everything
+else scales with the batch (k data copies, k slot publishes on their own lines);
+the single contended RMW on the position counter is what batching saves.
 
 The claim is `min(count, what's actually free)`: ask for 32 with 5 free and you
 get 5. Claiming all 32 up front would be the fetch_add trap again, just bigger.
-And the reason one CAS can safely take k slots at all: consumers advance in
-order, so readiness is contiguous — if slot `pos + k - 1` is free for this lap,
-everything before it is too.
+
+### Finding the run: forward scan, not a last-slot probe
+
+The obvious optimisation is to probe just the last slot — if `pos + k - 1` is free,
+assume `pos … pos + k - 1` all are, and binary-search for the largest such k. That
+would be wrong here. It assumes the free region is contiguous, and with several
+consumers it isn't.
+
+Consumers claim positions in order (the counter is monotonic) but can *finish* in
+any order. Say N=8, four consumers have claimed positions 92–95, and the one for 95
+finishes first: it stores `seq[95 & 7] = 103`, so the slot for position 103 reads
+free while the slot for position 100 still holds position 92's unconsumed item. A
+producer probing only slot 103 would claim 100–103 and overwrite that item.
+
+So the free run has to be found by scanning forward from `pos` and stopping at the
+first slot that isn't ready — `k` is the length of that contiguous run. It's k
+acquire-loads, but on the per-slot lines the batch is about to write anyway, not on
+the contended counter. Pop is symmetric (a slot is ready when its producer has
+published).
+
+The single CAS is still safe: if it succeeds, `pos` was unchanged, so no other
+producer claimed into the slots we scanned, and consumers only ever move seq
+forward — a slot seen free stays free until we write it. Publishing runs forward
+(`pos`, `pos+1`, …) so a consumer can start on the early items while the later ones
+are still being written.
 
 ## 9. Limitations (v1)
 
