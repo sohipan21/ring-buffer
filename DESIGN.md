@@ -219,6 +219,10 @@ reorderings the totals would miss. Configurations go up to 4 producers / 4
 consumers, plus a deliberately tiny N=4 buffer under 8 threads, where every
 operation lands on a full/empty boundary and claim races are constant.
 
+A separate configuration runs the same checks with producers pushing and
+consumers popping in random-sized batches mixed with single ops, so the batch
+claim and its partial-return path get the same contention coverage.
+
 All of it runs under ThreadSanitizer and under AddressSanitizer+UBSan in CI
 (separate builds — TSan doesn't combine with ASan), with no suppressions. Races
 in this kind of code are scheduling-dependent, so locally the stress test gets
