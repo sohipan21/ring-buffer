@@ -23,6 +23,9 @@ else()
 endif()
 
 option(RINGBUFFER_BUILD_TESTS "Build the test suite" ${RINGBUFFER_IS_TOP_LEVEL})
+option(RINGBUFFER_BUILD_BENCH "Build the benchmark suite" OFF)
+option(RINGBUFFER_FETCH_BASELINES
+    "Fetch third-party queues (moodycamel) for benchmark comparison" OFF)
 
 set(RINGBUFFER_SANITIZER "OFF" CACHE STRING
     "Sanitizer for test executables: OFF | thread | address (address also enables undefined)")
@@ -63,4 +66,10 @@ endfunction()
 if(RINGBUFFER_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+# --- benchmarks -----------------------------------------------------------------
+
+if(RINGBUFFER_BUILD_BENCH)
+    add_subdirectory(bench)
 endif()
