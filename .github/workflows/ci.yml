@@ -19,7 +19,7 @@ jobs:
       # Sanitizer builds run the stress suite 5-20x slower; scale it down.
       RINGBUFFER_STRESS_ITEMS: ${{ matrix.sanitizer == 'OFF' && '1000000' || '100000' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         run: >

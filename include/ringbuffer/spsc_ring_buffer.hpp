@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include <ringbuffer/cache_line.hpp>
+#include <ringbuffer/memory_order.hpp>
 
 namespace ringbuffer {
 
@@ -29,46 +30,48 @@ public:
     /// Enqueues one element. Returns false if the buffer is full.
     /// Producer thread only.
     [[nodiscard]] bool try_push(const T& item) {
-        const std::size_t head = head_.load(std::memory_order_relaxed);
+        const std::size_t head = head_.load(detail::mo_relaxed);
         if (head - cached_tail_ == N) {
             // Looks full through the cached view — refresh from the consumer.
-            cached_tail_ = tail_.load(std::memory_order_acquire);
+            cached_tail_ = tail_.load(detail::mo_acquire);
             if (head - cached_tail_ == N) {
                 return false;  // genuinely full
             }
         }
         data_[head & kMask] = item;
-        head_.store(head + 1, std::memory_order_release);
+        head_.store(head + 1, detail::mo_release);
         return true;
     }
 
     /// Dequeues one element into `out`. Returns false if the buffer is
     /// empty; `out` is untouched on failure. Consumer thread only.
     [[nodiscard]] bool try_pop(T& out) {
-        const std::size_t tail = tail_.load(std::memory_order_relaxed);
+        const std::size_t tail = tail_.load(detail::mo_relaxed);
         if (cached_head_ == tail) {
             // Looks empty through the cached view — refresh from the producer.
-            cached_head_ = head_.load(std::memory_order_acquire);
+            cached_head_ = head_.load(detail::mo_acquire);
             if (cached_head_ == tail) {
                 return false;  // genuinely empty
             }
         }
         out = data_[tail & kMask];
-        tail_.store(tail + 1, std::memory_order_release);
+        tail_.store(tail + 1, detail::mo_release);
         return true;
     }
 
     /// Approximate element count. Exact only while neither thread is
     /// mutating; intended for metrics and debugging.
     [[nodiscard]] std::size_t size_approx() const {
-        return head_.load(std::memory_order_relaxed) -
-               tail_.load(std::memory_order_relaxed);
+        return head_.load(detail::mo_relaxed) -
+               tail_.load(detail::mo_relaxed);
     }
 
     /// Compile-time capacity.
     static constexpr std::size_t capacity() { return N; }
 
 private:
+    friend struct SpscWhiteBox;  // tests inspect field alignment
+
     static constexpr std::size_t kMask = N - 1;
 
     // Fields are grouped by owning thread, one interference-size line per

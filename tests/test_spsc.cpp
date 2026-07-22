@@ -8,7 +8,26 @@
 #include <cstdint>
 #include <thread>
 
+#include <ringbuffer/cache_line.hpp>
 #include <ringbuffer/spsc_ring_buffer.hpp>
+
+namespace ringbuffer {
+
+// Test-only access to private layout (befriended by the class).
+struct SpscWhiteBox {
+    template <typename T, std::size_t N>
+    static void check_alignment(const SpscRingBuffer<T, N>& buf) {
+        auto line = [](const void* p) {
+            return reinterpret_cast<std::uintptr_t>(p) / kCacheLineSize;
+        };
+        // Producer's index, consumer's index, and the data each own a line.
+        assert(line(&buf.head_) != line(&buf.tail_));
+        assert(line(&buf.head_) != line(&buf.data_[0]));
+        assert(line(&buf.tail_) != line(&buf.data_[0]));
+    }
+};
+
+}  // namespace ringbuffer
 
 namespace {
 
@@ -105,6 +124,11 @@ void test_two_thread_transfer() {
     assert(buf.size_approx() == 0);
 }
 
+void test_alignment() {
+    ringbuffer::SpscRingBuffer<int, 8> buf;
+    ringbuffer::SpscWhiteBox::check_alignment(buf);
+}
+
 }  // namespace
 
 int main() {
@@ -113,6 +137,7 @@ int main() {
     test_pop_on_empty_fails();
     test_fill_to_full_then_drain();
     test_wraparound_multiple_laps();
+    test_alignment();
 
     test_two_thread_transfer<1024>();
     test_two_thread_transfer<4>();  // tiny buffer: constant boundary races

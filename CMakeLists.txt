@@ -28,6 +28,11 @@ set(RINGBUFFER_SANITIZER "OFF" CACHE STRING
     "Sanitizer for test executables: OFF | thread | address (address also enables undefined)")
 set_property(CACHE RINGBUFFER_SANITIZER PROPERTY STRINGS OFF thread address)
 
+option(RINGBUFFER_FORCE_SEQ_CST
+    "Force all atomics to seq_cst (to benchmark the cost of the tuned ordering)" OFF)
+option(RINGBUFFER_PACKED_SLOTS
+    "Pack slots tightly instead of padding each to a cache line" OFF)
+
 # Debug info in every configuration keeps sanitizer and profiler output usable.
 if(NOT MSVC)
     add_compile_options(-g)
@@ -44,6 +49,12 @@ function(ringbuffer_configure_target target)
         target_compile_options(${target} PRIVATE
             -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endif()
+    if(RINGBUFFER_FORCE_SEQ_CST)
+        target_compile_definitions(${target} PRIVATE RINGBUFFER_FORCE_SEQ_CST)
+    endif()
+    if(RINGBUFFER_PACKED_SLOTS)
+        target_compile_definitions(${target} PRIVATE RINGBUFFER_PACKED_SLOTS)
     endif()
 endfunction()
 

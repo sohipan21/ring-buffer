@@ -97,22 +97,41 @@ timeouts, and is out of scope.
 
 ## 6. Memory ordering
 
-Intended orders — the full audit gets finished against the real code:
+Every atomic operation, the order it uses, and what would go wrong with anything
+weaker. MPMC single and batch ops share the same operations.
 
-| Op | Order | Why |
-|---|---|---|
-| seq load before claiming | acquire | Pairs with the release store below; makes the previous owner's writes visible first |
-| seq store after write/consume | release | Publishes the new state plus everything written before it |
-| position CAS | relaxed | Positions only arbitrate who gets a slot; the seqs carry the data synchronisation |
-| position reloads on retry | relaxed | A stale value costs one extra retry, nothing worse |
+**MPMC**
 
-The claim CAS is `compare_exchange_weak`: it can fail spuriously, but it already
-sits in a retry loop, and weak avoids the extra inner loop that strong compiles
-to on LL/SC architectures like ARM. On failure the CAS also reloads the position
-for free.
+| Operation | Order | Pairs with | Breaks if weaker |
+|---|---|---|---|
+| position load + retry reload | relaxed | — | nothing (stale → one retry) |
+| slot `seq` load (probe) | acquire | the previous owner's release store | data race on the slot's `data` |
+| position CAS (claim) | relaxed | — (RMW is atomic) | nothing — see note |
+| slot `seq` store (publish / free) | release | the other side's acquire load | reader sees the new seq but stale `data` |
+| constructor `seq` stores | relaxed | — | nothing — see note |
+| `size_approx` loads | relaxed | — | racy by design |
 
-seq_cst everywhere would also be correct, just slower. I plan to add a toggle
-that forces seq_cst so the difference is a measurement rather than a guess.
+**SPSC** (details in §10)
+
+| Operation | Order | Pairs with | Breaks if weaker |
+|---|---|---|---|
+| own index load | relaxed | — | nothing (sole writer) |
+| other index load | acquire | the other thread's release store | read/overwrite races the other side |
+| own index store (publish) | release | the other thread's acquire load | reader sees the index move but stale data |
+
+Two that look too weak but aren't. The **position CAS is relaxed** because it only
+decides *who* owns a run of slots; the RMW is atomic and the counter has a single
+modification order, which is all mutual exclusion needs — the seqs carry every data
+hand-off. The **constructor's seq stores are relaxed** because construction finishes
+before the buffer is handed to any thread, and that hand-off is itself a
+synchronisation point.
+
+The claim uses `compare_exchange_weak`: it can fail spuriously, but it's already in a
+retry loop, weak avoids the inner loop that strong compiles to on LL/SC machines like
+ARM, and a failed CAS reloads the position for free.
+
+`RINGBUFFER_FORCE_SEQ_CST` collapses every order above to seq_cst — still correct, just
+slower. Phase 6 measures what the tuned ordering actually buys.
 
 ## 7. False sharing
 
@@ -126,8 +145,9 @@ AppleClang's libc++ doesn't ship the constant, and Apple Silicon cache lines are
 128 bytes (`sysctl hw.cachelinesize`), not 64 — the usual `alignas(64)` would put
 both counters inside one 128-byte boundary. Each *slot* is currently padded to
 its own line too — neighbouring slots get written by different threads, so I'm
-starting from the no-false-sharing layout and will measure what the padding
-costs in density once the benchmarks exist.
+starting from the no-false-sharing layout. `RINGBUFFER_PACKED_SLOTS` drops that
+padding for the density-vs-interference A/B in Phase 6. The tests assert the two
+positions and the slot array each land on their own line.
 
 ## 8. Batch operations
 

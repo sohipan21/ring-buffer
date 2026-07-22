@@ -6,16 +6,30 @@
 #include <cassert>
 
 #include <cstddef>
+#include <cstdint>
 
+#include <ringbuffer/cache_line.hpp>
 #include <ringbuffer/mpmc_ring_buffer.hpp>
 
 namespace ringbuffer {
 
-// Test-only access to slot sequence numbers (befriended by the class).
+// Test-only access to private layout (befriended by the class).
 struct MpmcWhiteBox {
     template <typename T, std::size_t N>
     static std::size_t seq(const MpmcRingBuffer<T, N>& buf, std::size_t i) {
         return buf.slots_[i].seq.load(std::memory_order_relaxed);
+    }
+
+    template <typename T, std::size_t N>
+    static void check_alignment(const MpmcRingBuffer<T, N>& buf) {
+        auto line = [](const void* p) {
+            return reinterpret_cast<std::uintptr_t>(p) / kCacheLineSize;
+        };
+        // The two claim counters and the slot array each own a distinct line,
+        // so producers and consumers never contend the same one.
+        assert(line(&buf.enqueue_pos_) != line(&buf.dequeue_pos_));
+        assert(line(&buf.enqueue_pos_) != line(&buf.slots_[0]));
+        assert(line(&buf.dequeue_pos_) != line(&buf.slots_[0]));
     }
 };
 
@@ -273,6 +287,11 @@ void test_batch_seq_encodes_laps() {
     }
 }
 
+void test_alignment() {
+    ringbuffer::MpmcRingBuffer<int, 8> buf;
+    ringbuffer::MpmcWhiteBox::check_alignment(buf);
+}
+
 void test_batch_single_mixed_fifo() {
     // Interleave single and batch ops; global dequeue order must equal the
     // enqueue order regardless of how items were grouped.
@@ -326,5 +345,7 @@ int main() {
     test_batch_wraparound();
     test_batch_seq_encodes_laps();
     test_batch_single_mixed_fifo();
+
+    test_alignment();
     return 0;
 }

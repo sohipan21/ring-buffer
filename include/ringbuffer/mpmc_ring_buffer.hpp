@@ -7,6 +7,7 @@
 #include <type_traits>
 
 #include <ringbuffer/cache_line.hpp>
+#include <ringbuffer/memory_order.hpp>
 
 namespace ringbuffer {
 
@@ -32,64 +33,64 @@ public:
         // Slot i starts at seq == i: free for the producer at position i.
         // No concurrent access yet, so relaxed stores are enough.
         for (std::size_t i = 0; i < N; ++i) {
-            slots_[i].seq.store(i, std::memory_order_relaxed);
+            slots_[i].seq.store(i, detail::mo_relaxed);
         }
     }
 
     /// Enqueues one element. Returns false if the buffer is full; nothing is
     /// claimed or written on failure.
     [[nodiscard]] bool try_push(const T& item) {
-        std::size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
+        std::size_t pos = enqueue_pos_.load(detail::mo_relaxed);
         Slot* slot;
         for (;;) {
             slot = &slots_[pos & kMask];
-            const std::size_t seq = slot->seq.load(std::memory_order_acquire);
+            const std::size_t seq = slot->seq.load(detail::mo_acquire);
             const auto diff = static_cast<std::intptr_t>(seq) -
                               static_cast<std::intptr_t>(pos);
             if (diff == 0) {
                 // Free for this lap — claim it. Weak CAS: we're in a retry
                 // loop anyway, and failure reloads `pos` for us.
                 if (enqueue_pos_.compare_exchange_weak(
-                        pos, pos + 1, std::memory_order_relaxed)) {
+                        pos, pos + 1, detail::mo_relaxed)) {
                     break;
                 }
             } else if (diff < 0) {
                 return false;  // full — nothing claimed
             } else {
                 // Another producer claimed this position; catch up.
-                pos = enqueue_pos_.load(std::memory_order_relaxed);
+                pos = enqueue_pos_.load(detail::mo_relaxed);
             }
         }
         slot->data = item;
-        slot->seq.store(pos + 1, std::memory_order_release);  // publish
+        slot->seq.store(pos + 1, detail::mo_release);  // publish
         return true;
     }
 
     /// Dequeues one element into `out`. Returns false if the buffer is
     /// empty; `out` is untouched on failure.
     [[nodiscard]] bool try_pop(T& out) {
-        std::size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
+        std::size_t pos = dequeue_pos_.load(detail::mo_relaxed);
         Slot* slot;
         for (;;) {
             slot = &slots_[pos & kMask];
-            const std::size_t seq = slot->seq.load(std::memory_order_acquire);
+            const std::size_t seq = slot->seq.load(detail::mo_acquire);
             const auto diff = static_cast<std::intptr_t>(seq) -
                               static_cast<std::intptr_t>(pos + 1);
             if (diff == 0) {
                 // Published for this lap — claim it.
                 if (dequeue_pos_.compare_exchange_weak(
-                        pos, pos + 1, std::memory_order_relaxed)) {
+                        pos, pos + 1, detail::mo_relaxed)) {
                     break;
                 }
             } else if (diff < 0) {
                 return false;  // empty — nothing claimed
             } else {
                 // Another consumer claimed this position; catch up.
-                pos = dequeue_pos_.load(std::memory_order_relaxed);
+                pos = dequeue_pos_.load(detail::mo_relaxed);
             }
         }
         out = slot->data;
-        slot->seq.store(pos + N, std::memory_order_release);  // free for next lap
+        slot->seq.store(pos + N, detail::mo_release);  // free for next lap
         return true;
     }
 
@@ -107,8 +108,8 @@ public:
     /// Approximate element count. Inherently racy under concurrent use —
     /// intended for metrics and debugging, never for control flow.
     [[nodiscard]] std::size_t size_approx() const {
-        return enqueue_pos_.load(std::memory_order_relaxed) -
-               dequeue_pos_.load(std::memory_order_relaxed);
+        return enqueue_pos_.load(detail::mo_relaxed) -
+               dequeue_pos_.load(detail::mo_relaxed);
     }
 
     /// Compile-time capacity.
@@ -117,10 +118,15 @@ public:
 private:
     friend struct MpmcWhiteBox;  // tests read slot seqs directly
 
-    // One slot per interference-size line for now: neighbouring slots get
-    // written by different threads, and the padding-vs-density trade hasn't
-    // been measured yet (DESIGN.md §7).
+    // Each slot on its own interference-size line by default: neighbouring
+    // slots get written by different threads. RINGBUFFER_PACKED_SLOTS drops the
+    // padding for the density-vs-interference A/B (DESIGN.md §7); correctness is
+    // the same either way.
+#if defined(RINGBUFFER_PACKED_SLOTS)
+    struct Slot {
+#else
     struct alignas(kCacheLineSize) Slot {
+#endif
         std::atomic<std::size_t> seq;
         T data;
     };
@@ -132,6 +138,11 @@ private:
     alignas(kCacheLineSize) std::atomic<std::size_t> enqueue_pos_{0};
     alignas(kCacheLineSize) std::atomic<std::size_t> dequeue_pos_{0};
     alignas(kCacheLineSize) std::array<Slot, N> slots_;
+
+#if !defined(RINGBUFFER_PACKED_SLOTS)
+    static_assert(alignof(Slot) == kCacheLineSize,
+                  "padded slots must sit one per cache line");
+#endif
 };
 
 // ---------------------------------------------------------------------------
@@ -150,14 +161,14 @@ std::size_t MpmcRingBuffer<T, N>::try_push_batch(const T* items,
         return 0;
     }
     const std::size_t k0 = count < N ? count : N;  // can't claim past capacity
-    std::size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
+    std::size_t pos = enqueue_pos_.load(detail::mo_relaxed);
     std::size_t k;
     for (;;) {
         // Forward scan: longest contiguous run of slots free for this lap.
         k = 0;
         while (k < k0) {
             const std::size_t seq =
-                slots_[(pos + k) & kMask].seq.load(std::memory_order_acquire);
+                slots_[(pos + k) & kMask].seq.load(detail::mo_acquire);
             const auto diff = static_cast<std::intptr_t>(seq) -
                               static_cast<std::intptr_t>(pos + k);
             if (diff != 0) {
@@ -171,7 +182,7 @@ std::size_t MpmcRingBuffer<T, N>::try_push_batch(const T* items,
         // Claim all k at once. Success means enqueue_pos was still pos, so no
         // other producer touched the scanned slots.
         if (enqueue_pos_.compare_exchange_weak(pos, pos + k,
-                                               std::memory_order_relaxed)) {
+                                               detail::mo_relaxed)) {
             break;
         }
         // CAS failed → pos reloaded; rescan from the new position.
@@ -181,7 +192,7 @@ std::size_t MpmcRingBuffer<T, N>::try_push_batch(const T* items,
         slot.data = items[i];
         // Publish forward so consumers can start on early items while later
         // ones are still being written.
-        slot.seq.store(pos + i + 1, std::memory_order_release);
+        slot.seq.store(pos + i + 1, detail::mo_release);
     }
     return k;
 }
@@ -192,14 +203,14 @@ std::size_t MpmcRingBuffer<T, N>::try_pop_batch(T* out, std::size_t max_count) {
         return 0;
     }
     const std::size_t k0 = max_count < N ? max_count : N;
-    std::size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
+    std::size_t pos = dequeue_pos_.load(detail::mo_relaxed);
     std::size_t k;
     for (;;) {
         // Forward scan: longest contiguous run of slots published for this lap.
         k = 0;
         while (k < k0) {
             const std::size_t seq =
-                slots_[(pos + k) & kMask].seq.load(std::memory_order_acquire);
+                slots_[(pos + k) & kMask].seq.load(detail::mo_acquire);
             const auto diff = static_cast<std::intptr_t>(seq) -
                               static_cast<std::intptr_t>(pos + k + 1);
             if (diff != 0) {
@@ -211,14 +222,14 @@ std::size_t MpmcRingBuffer<T, N>::try_pop_batch(T* out, std::size_t max_count) {
             return 0;  // empty at the front
         }
         if (dequeue_pos_.compare_exchange_weak(pos, pos + k,
-                                               std::memory_order_relaxed)) {
+                                               detail::mo_relaxed)) {
             break;
         }
     }
     for (std::size_t i = 0; i < k; ++i) {
         Slot& slot = slots_[(pos + i) & kMask];
         out[i] = slot.data;
-        slot.seq.store(pos + i + N, std::memory_order_release);  // free next lap
+        slot.seq.store(pos + i + N, detail::mo_release);  // free next lap
     }
     return k;
 }
