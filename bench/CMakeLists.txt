@@ -15,4 +15,4 @@ function(ringbuffer_add_bench name)
     ringbuffer_configure_target(${name})
 endfunction()
 
-# Bench executables are added here as they land (Parts B and C).
+ringbuffer_add_bench(bench_throughput)
