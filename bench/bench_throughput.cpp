@@ -23,6 +23,7 @@
 
 #include <bench/barrier.hpp>
 #include <bench/baselines/mutex_queue.hpp>
+#include <bench/queue_adapters.hpp>
 #include <bench/thread_util.hpp>
 #include <bench/timer.hpp>
 
@@ -161,10 +162,17 @@ int main() {
 
     const std::size_t thread_configs[][2] = {{1, 1}, {2, 2}, {4, 4}};
 
+#if defined(RINGBUFFER_HAVE_MOODYCAMEL)
+    using Moody = ringbuffer::bench::MoodycamelQueue<std::uint64_t, kCapacity>;
+#endif
+
     // Single-op throughput.
     for (const auto& cfg : thread_configs) {
         measure<Mpmc>("mpmc", cfg[0], cfg[1], 1, ops, trials);
         measure<Mutex>("mutex", cfg[0], cfg[1], 1, ops, trials);
+#if defined(RINGBUFFER_HAVE_MOODYCAMEL)
+        measure<Moody>("moodycamel", cfg[0], cfg[1], 1, ops, trials);
+#endif
     }
     measure<Spsc>("spsc", 1, 1, 1, ops, trials);  // SPSC is 1P/1C only
 
@@ -174,6 +182,9 @@ int main() {
         for (std::size_t b : batches) {
             measure<Mpmc>("mpmc", cfg[0], cfg[1], b, ops, trials);
             measure<Mutex>("mutex", cfg[0], cfg[1], b, ops, trials);
+#if defined(RINGBUFFER_HAVE_MOODYCAMEL)
+            measure<Moody>("moodycamel", cfg[0], cfg[1], b, ops, trials);
+#endif
         }
     }
 
