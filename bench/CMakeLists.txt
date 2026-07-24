@@ -8,6 +8,10 @@ find_package(Threads REQUIRED)
 # comparison point. Bench-only; never a dependency of the core library.
 if(RINGBUFFER_FETCH_BASELINES)
     include(FetchContent)
+    # moodycamel's CMakeLists asks for cmake_minimum_required(3.9), which newer
+    # CMake warns is deprecated. Pin a floor for the fetched subproject so the
+    # third-party warning doesn't leak into our build. Ignored by older CMake.
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
     FetchContent_Declare(moodycamel
         GIT_REPOSITORY https://github.com/cameron314/concurrentqueue.git
         GIT_TAG v1.0.4)
