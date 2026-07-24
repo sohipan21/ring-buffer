@@ -247,3 +247,47 @@ All of it runs under ThreadSanitizer and under AddressSanitizer+UBSan in CI
 (separate builds — TSan doesn't combine with ASan), with no suppressions. Races
 in this kind of code are scheduling-dependent, so locally the stress test gets
 run repeatedly under TSan rather than once.
+
+## 12. Reading the numbers
+
+Full data is in `results/`; reproduce with `scripts/run_benchmarks.sh`. These were
+taken on an Apple M2 Pro (6 performance + 4 efficiency cores), unpinned, on an
+active machine — directional, not a pinned-server benchmark.
+
+| Measure (MPMC) | Result | Baseline |
+|---|---|---|
+| Throughput, 4P/4C, single op | ~5.0 M ops/s | mutex ~16 M |
+| Throughput, 4P/4C, batch 64 | ~91 M ops/s | mutex ~62 M |
+| Ping-pong latency, p50 / p99.9 | 169 ns / ~700 ns | mutex 2.7 µs / ~190 µs |
+| End-to-end latency, saturated | ~61 µs | moodycamel ~6 ms |
+
+**Batching is the throughput story.** At 4P/4C, single ops do ~5 M/s; batching lifts
+that to ~91 M at batch 64 — one CAS amortised over k items, ~18×, and the gain is
+largest exactly where contention is worst.
+
+**Latency: lower median, bounded tail.** The tail matters more than the median here —
+MPMC's p99.9 round-trip is ~700 ns against the mutex's ~190 µs (max 1.6 ms). A lock's
+worst case is unbounded; a slot's isn't.
+
+**Bounded is a feature.** Saturated, the unbounded moodycamel queue shows ~6 ms
+end-to-end — items pile up with no backpressure — versus ~61 µs here. A different
+guarantee, not a slower one.
+
+**The honest part: single ops under oversubscription.** With 8 threads (4P/4C) on 6
+performance cores, single-op MPMC (~5 M) trails the mutex (~16 M): a thread
+descheduled mid-claim stalls its consumer (§5), and the mutex degrades more
+gracefully. At 1P/1C, MPMC leads ~2×. This is macOS-specific — no thread pinning — so
+a pinned Linux run with more cores is the fair contention test, and is future work.
+
+**seq_cst costs nothing measurable here.** Forcing every order to seq_cst
+(`RINGBUFFER_FORCE_SEQ_CST`) lands within run-to-run noise of the tuned
+acquire/release. At these sizes the queue is bound by coherence traffic on the shared
+counters, not by fences. The tuned orders stay the default — they can't be slower, and
+matter more on other microarchitectures — but there's no speedup here worth claiming.
+
+**Padding vs packing.** Padding each slot to its own line wins where it should — the
+false-sharing case of single-op multiple producers (2P/2C: 8.0 vs 6.5 M/s padded vs
+packed). Packing wins for batch and low-thread runs, sometimes a lot (4P/4C batch 64:
+~150 vs ~91 M/s), where contiguous-slot runs make density pay. Padded stays the
+default because it protects the worst case; `RINGBUFFER_PACKED_SLOTS` is there for
+batch-heavy uses.
