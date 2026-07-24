@@ -1,0 +1,22 @@
+date:        Fri Jul 24 00:05:06 EDT 2026
+host:        Sohams-MBP-4.mynetworksettings.com
+uname:       Darwin Sohams-MBP-4.mynetworksettings.com 25.1.0 Darwin Kernel Version 25.1.0: Mon Oct 20 19:33:00 PDT 2025; root:xnu-12377.41.6~2/RELEASE_ARM64_T6020 arm64
+git commit:  f29496d2d836d4cc3c06f91386ad04625bd76bd3
+compiler:    /usr/bin/c++
+             Apple clang version 15.0.0 (clang-1500.3.9.4)
+cmake:       cmake version 4.3.2
+label:       <none>
+cmake args:  
+bench env:   OPS=8000000 TRIALS=5 SAMPLES=200000 WARMUP=20000 RATE=2000000
+
+cpu:
+  model:       Apple M2 Pro
+  logical:     10
+  perf cores:  6
+  effic cores: 4
+  cache line:  128 bytes
+  memory:      16 GiB
+
+conditions:  background load not controlled; single unpinned host run.
+             macOS has no thread pinning (QoS-biased to P-cores); see DESIGN.md.
+timer:       timer overhead ~25.0 ns/call
